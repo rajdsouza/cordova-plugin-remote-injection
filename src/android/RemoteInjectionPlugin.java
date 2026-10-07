@@ -18,15 +18,25 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.regex.Pattern;
 
 public class RemoteInjectionPlugin extends CordovaPlugin {
     private static String TAG = "RemoteInjectionPlugin";
-    private static Pattern REMOTE_URL_REGEX = Pattern.compile("^http(s)?://.*");
+    // Cordova is injected only into HTTPS pages: injecting the native bridge into a cleartext
+    // page would hand device access to anyone able to tamper with the connection.
+    private static Pattern REMOTE_URL_REGEX = Pattern.compile("^https://.*");
+
+    // Optional allow-list (preference CRIAllowedHosts, comma-separated): exact hosts, or
+    // "*.example.com" for any subdomain of example.com. When set, only pages on these hosts get
+    // the native bridge; when empty, any HTTPS page does (previous behaviour, minus http).
+    private final ArrayList<String> allowedHosts = new ArrayList<String>();
 
 
     // List of files to inject before injecting Cordova.
@@ -41,6 +51,13 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
             preInjectionFileNames.add(path.trim());
         }
         promptInterval = webView.getPreferences().getInteger("CRIPageLoadPromptInterval", 10);
+
+        for (String host: webView.getPreferences().getString("CRIAllowedHosts", "").split(",")) {
+            host = host.trim().toLowerCase(Locale.ROOT);
+            if (!host.isEmpty()) {
+                allowedHosts.add(host);
+            }
+        }
 
         final Activity activity = super.cordova.getActivity();
         final CordovaWebViewEngine engine = super.webView.getEngine();
@@ -106,10 +123,38 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
 
     /**
      * @param url
-     * @return true if the URL over HTTP or HTTPS
+     * @return true if the URL is HTTPS and, when an allow-list is configured, on an allowed host
      */
     private boolean isRemote(String url) {
-        return REMOTE_URL_REGEX.matcher((String) url).matches();
+        if (url == null || !REMOTE_URL_REGEX.matcher(url).matches()) {
+            return false;
+        }
+        if (allowedHosts.isEmpty()) {
+            return true;
+        }
+
+        String host;
+        try {
+            host = new URI(url).getHost();
+        } catch (URISyntaxException e) {
+            return false;
+        }
+        if (host == null) {
+            return false;
+        }
+        host = host.toLowerCase(Locale.ROOT);
+
+        for (String allowed: allowedHosts) {
+            if (allowed.startsWith("*.")) {
+                // "*.example.com" matches sub.example.com, not example.com or evilexample.com.
+                if (host.endsWith(allowed.substring(1))) {
+                    return true;
+                }
+            } else if (host.equals(allowed)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void injectCordova() {
