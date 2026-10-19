@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.content.res.AssetManager;
+import android.net.Uri;
 import android.util.Base64;
 
 import org.apache.cordova.CordovaPlugin;
@@ -20,6 +21,7 @@ import java.io.InputStreamReader;
 import java.net.MalformedURLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.regex.Pattern;
@@ -35,7 +37,18 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
 
     private RequestLifecycle lifecycle;
 
+    // Hosts whose pages get the Cordova bridge (CRIAllowedHosts, comma separated; "*.example.com"
+    // matches any subdomain). When set, only HTTPS pages on these hosts are injected; every other
+    // page loads without native access. Unset keeps the original behaviour (any http(s) page).
+    private final ArrayList<String> allowedHosts = new ArrayList<String>();
+
     protected void pluginInitialize() {
+        for (String host: webView.getPreferences().getString("CRIAllowedHosts", "").split(",")) {
+            if (!host.trim().isEmpty()) {
+                allowedHosts.add(host.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+
         String pref = webView.getPreferences().getString("CRIInjectFirstFiles", "");
         for (String path: pref.split(",")) {
             preInjectionFileNames.add(path.trim());
@@ -54,8 +67,14 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
     @Override
     public void onReset() {
         super.onReset();
-
+        LOG.e(TAG, "Reset called");
         lifecycle.requestStopped();
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        LOG.e(TAG, "onDestroy called");
     }
 
     @Override
@@ -83,7 +102,11 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
             if (data instanceof String) {
                 String url = (String) data;
                 if (isRemote(url)) {
-                    injectCordova();
+                    if (isInjectable(url)) {
+                        injectCordova();
+                    } else {
+                        LOG.w(TAG, "Not injecting Cordova into a page outside CRIAllowedHosts");
+                    }
                     lifecycle.requestStopped();
                 }
             } else {
@@ -110,6 +133,32 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
      */
     private boolean isRemote(String url) {
         return REMOTE_URL_REGEX.matcher((String) url).matches();
+    }
+
+    /**
+     * @param url a remote page that finished loading
+     * @return true if the page may receive the Cordova bridge
+     */
+    private boolean isInjectable(String url) {
+        if (allowedHosts.isEmpty()) {
+            return true;
+        }
+        Uri uri = Uri.parse(url);
+        String host = uri.getHost();
+        if (!"https".equalsIgnoreCase(uri.getScheme()) || host == null) {
+            return false;
+        }
+        host = host.toLowerCase(Locale.ROOT);
+        for (String allowed: allowedHosts) {
+            if (allowed.startsWith("*.")) {
+                if (host.endsWith(allowed.substring(1))) {
+                    return true;
+                }
+            } else if (host.equals(allowed)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void injectCordova() {
